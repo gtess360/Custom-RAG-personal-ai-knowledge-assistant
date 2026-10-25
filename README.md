@@ -4,7 +4,8 @@ An evidence-grounded Retrieval-Augmented Generation (RAG) system that answers qu
 
 ## Architecture
 
-The system uses a decoupled web architecture:
+The system supports both a standalone Streamlit application and a decoupled web architecture:
+- **Streamlit Web Application (`streamlit_app.py`)**: Standalone local interface calling `src.pipeline.query_pipeline` directly. Does not require FastAPI or Next.js to be running.
 - **Backend API (Python / FastAPI)**: Hosts the RAG pipeline (`src.pipeline.query_pipeline`), local SentenceTransformer embeddings (`all-MiniLM-L6-v2`), persistent Chroma vector storage, and evidence-grounded generation via the OpenAI API (`gpt-4o-mini`).
 - **Frontend App (Next.js / TypeScript / React)**: Clean web interface designed for deployment to Vercel, querying the backend via REST endpoints.
 
@@ -24,6 +25,66 @@ The system uses a decoupled web architecture:
 1. **Python**: Python 3.12+ with virtual environment (`.venv`).
 2. **Node.js**: Node.js v20+ or v24+ and `npm` (verified on Node v24.22.1 / npm 11.19.1).
 3. **OpenAI API Key**: Configured in root `.env` for generation.
+
+---
+
+## Streamlit Web Interface (Active Interface)
+
+The local Streamlit application directly calls `src.pipeline.query_pipeline`. It does not require running the FastAPI server or the Next.js frontend.
+
+### 1. Installation
+Install project dependencies including Streamlit:
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+### 2. Configure Credentials
+Configure `.env` in the project root:
+```ini
+OPENAI_API_KEY=sk-your-actual-api-key
+OPENAI_MODEL=gpt-4o-mini
+```
+*(Never commit `.env` or `.streamlit/secrets.toml` to version control).*
+
+### 3. Build Knowledge Index (If not already built)
+```powershell
+.\.venv\Scripts\python.exe ingest.py
+```
+*(Note: Streamlit performs read-only pre-flight index checks and will never automatically rebuild or overwrite the index).*
+
+### 4. Launch the Local Streamlit App
+```powershell
+.\.venv\Scripts\python.exe -m streamlit run streamlit_app.py
+```
+Or with virtual environment activated:
+```bash
+streamlit run streamlit_app.py
+```
+The application will open in your browser at `http://localhost:8501`.
+
+**Features Provided**:
+- **Title**: Personal AI Knowledge Assistant
+- **Question Input**: Character-limited to 500 characters
+- **Top-K Selector**: Slider from 1 to 10 (defaults to 5)
+- **Explicit Submission**: Ask button inside a form prevents accidental queries
+- **State Preservation**: Queries are submitted only on explicit Ask actions; results are cached in Streamlit session state across ordinary UI reruns
+- **Status Display**: Distinct visual indicators for answered, partial, conflict, abstain, and error statuses
+- **Evidence & Citations**: Direct display of grounded answer, missing information, storage-verified citations, and expandable retrieved evidence chunks showing source, chunk ID, and raw cosine distance (smaller is more similar; not a probability)
+- **Latency Timings**: Live display of retrieval, generation, and total latency breakdown
+
+### 5. Streamlit Community Cloud Settings
+
+For deployment on Streamlit Community Cloud (via the app settings dashboard or `.streamlit/secrets.toml`):
+
+| Variable / Secret | Required in Cloud | Default | Description & Security Boundary |
+|---|---|---|---|
+| `APP_ENV` | **Yes** | `development` | Set to `production` for cloud deployments. Enforces reviewer authentication and fails closed if access tokens are missing. |
+| `OPENAI_API_KEY` | **Yes** | None | **Confidential.** OpenAI API key for `gpt-4o-mini` generation. Populated from Streamlit secrets before config loading; never displayed or logged. |
+| `OPENAI_MODEL` | No | `gpt-4o-mini` | Operational model identifier override. |
+| `REVIEWER_ACCESS_TOKEN` | **Yes** in prod | None | **Confidential.** Shared secret token required in production (`APP_ENV=production`). Streamlit displays a password gate before allowing queries and fails closed if unset. |
+| `STREAMLIT_DEMO_BOOTSTRAP` | Optional | `false` | When set to `true`, automatically builds the Chroma index from committed sanitized documents in `data/documents/` on startup if the index is missing or empty. Safe, once-per-process, thread-locked, double-checked, and never replaces an existing index. |
 
 ---
 

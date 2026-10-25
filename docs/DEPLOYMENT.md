@@ -92,6 +92,20 @@ Environment variables are partitioned strictly by security boundary. **Backend c
 
 ---
 
+### Streamlit Web Application (Streamlit Community Cloud Settings)
+
+When deploying `streamlit_app.py` directly to Streamlit Community Cloud:
+
+| Variable / Secret | Required | Default | Security Boundary | Purpose & Constraints |
+|---|---|---|---|---|
+| `APP_ENV` | **Yes** in prod | `development` | Server Environment | Set to `production` on Streamlit Cloud. Fails closed and blocks queries if `REVIEWER_ACCESS_TOKEN` is unset. |
+| `OPENAI_API_KEY` | **Yes** | None | **Confidential** | OpenAI API key for `gpt-4o-mini` generation. Populated from Streamlit secrets dashboard before config loading; never displayed or logged. |
+| `OPENAI_MODEL` | No | `gpt-4o-mini` | Operational | Generation model name override. |
+| `REVIEWER_ACCESS_TOKEN` | **Yes** in prod | None | **Confidential** | Reviewer authentication token. Required in production; Streamlit renders a password form to unlock queries. |
+| `STREAMLIT_DEMO_BOOTSTRAP` | Optional | `false` | Operational | When `true`, automatically builds the Chroma index from committed sanitized files in `data/documents/` on startup if the index is missing or empty. Safe, thread-locked, double-checked, and never replaces an existing index. |
+
+---
+
 ## 4. Authentication & Reviewer Access Flow
 
 Merely hiding the backend token inside a server-side proxy does not protect the system if the proxy itself is publicly callable without authentication. To prevent unauthorized proxy abuse and LLM credit exhaustion, a single, documented **Reviewer Access Flow** is enforced:
