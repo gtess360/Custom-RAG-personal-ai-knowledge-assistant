@@ -206,8 +206,10 @@ def test_bootstrap_incompatible_index_not_rebuilt(monkeypatch):
         mock_ingest.assert_not_called()
 
 
-def test_bootstrap_initialization_failure(monkeypatch):
-    """Verify bootstrap failure records error and blocks subsequent operations."""
+def test_bootstrap_initialization_failure(monkeypatch, caplog):
+    """Verify bootstrap failure records error, logs traceback with packages, and blocks subsequent operations."""
+    import logging
+    caplog.set_level(logging.ERROR)
     monkeypatch.setenv("STREAMLIT_DEMO_BOOTSTRAP", "true")
 
     mock_client = MagicMock()
@@ -219,6 +221,11 @@ def test_bootstrap_initialization_failure(monkeypatch):
         assert ok is False
         assert "STREAMLIT_DEMO_BOOTSTRAP failed" in err
         assert "Disk write error" in err
+
+        # Verify server-side traceback and package diagnostic logging occurred
+        assert "STREAMLIT_DEMO_BOOTSTRAP failed: Disk write error" in caplog.text
+        assert "Traceback" in caplog.text
+        assert "packages:" in caplog.text
 
         # Subsequent call returns cached error without re-running ingest
         ok2, err2 = maybe_bootstrap_index()

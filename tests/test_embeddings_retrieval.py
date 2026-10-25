@@ -595,3 +595,76 @@ def test_real_model_smoke(tmp_path):
     assert results[0]["chunk_id"] == "smoke_0"  # AI engineer text should rank first
     assert results[0]["distance"] < results[1]["distance"]
     print(f"\n[smoke] Top result: '{results[0]['text']}' | distance={results[0]['distance']:.4f}")
+
+
+def test_get_embedding_package_versions():
+    """Verify package version helper returns expected keys and no sensitive info."""
+    import os
+    from src.embeddings import get_embedding_package_versions
+
+    os.environ["SECRET_TEST_KEY"] = "super_secret_value_12345"
+    versions = get_embedding_package_versions()
+
+    assert "python" in versions
+    assert "sentence_transformers" in versions
+    assert "transformers" in versions
+    assert "torch" in versions
+    # Check no environment variable or credential leaks
+    for k, v in versions.items():
+        assert "super_secret_value_12345" not in str(v)
+        assert "SECRET_TEST_KEY" not in str(k)
+
+
+def test_get_model_thread_safety_concurrent():
+    """Verify concurrent calls to _get_model() safely return the exact same instance."""
+    import threading
+    import src.embeddings as emb
+
+    instances = []
+    errors = []
+
+    def worker():
+        try:
+            m = emb._get_model()
+            instances.append(m)
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(errors) == 0, f"Concurrent _get_model failed with errors: {errors}"
+    assert len(instances) == 8
+    # All threads got the exact same model instance
+    assert all(inst is instances[0] for inst in instances)
+
+
+def test_get_model_logs_traceback_on_failure(monkeypatch, caplog):
+    """Verify _get_model logs package versions and full traceback on failure."""
+    import logging
+    import src.embeddings as emb
+
+    caplog.set_level(logging.ERROR)
+    old_model = emb._MODEL
+    emb._MODEL = None
+
+    def _fail_init(*args, **kwargs):
+        raise RuntimeError("Simulated model construction crash")
+
+    try:
+        import sentence_transformers
+        monkeypatch.setattr(sentence_transformers, "SentenceTransformer", _fail_init)
+
+        with pytest.raises(RuntimeError, match="Simulated model construction crash"):
+            emb._get_model()
+
+        assert "Failed to load embedding model" in caplog.text
+        assert "Traceback" in caplog.text
+        assert "Simulated model construction crash" in caplog.text
+        assert "Package versions:" in caplog.text
+        assert "sentence_transformers" in caplog.text
+    finally:
+        emb._MODEL = old_model

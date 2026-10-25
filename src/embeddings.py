@@ -12,23 +12,50 @@ IMPORTANT (per TECH_STACK.md):
 
 from __future__ import annotations
 
+import logging
+import sys
+import threading
+import traceback
 from typing import Optional
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 # Lazy-load sentinel: the model is created on first use and cached here.
 _MODEL = None
 _MODEL_NAME: Optional[str] = None
+_MODEL_LOCK = threading.Lock()
 
 EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
 EMBEDDING_DIMENSION = 384   # Fixed output size for all-MiniLM-L6-v2
 
 
+def get_embedding_package_versions() -> dict[str, str]:
+    """Return dictionary of ML library versions for diagnostic logging.
+
+    Safe for server-side logging: never logs credentials, environment
+    variables, user questions, or document text.
+    """
+    versions = {
+        "python": sys.version.split()[0],
+    }
+    for pkg in ("sentence_transformers", "transformers", "torch"):
+        try:
+            mod = __import__(pkg)
+            versions[pkg] = getattr(mod, "__version__", "unknown")
+        except Exception as exc:
+            versions[pkg] = f"unavailable ({exc})"
+    return versions
+
+
 def _get_model():
     """Return the cached SentenceTransformer model, loading it on first call.
 
-    The model is loaded once per Python process. If this is the first call in
-    a fresh environment, sentence-transformers will download the model weights
-    from the Hugging Face Hub (~90 MB) and cache them locally in
+    The model is loaded once per Python process with a thread-safe double-checked
+    lock to prevent race conditions during concurrent startup in multi-threaded
+    servers (such as Streamlit Cloud). If this is the first call in a fresh
+    environment, sentence-transformers will download the model weights from
+    the Hugging Face Hub (~90 MB) and cache them locally in
     ~/.cache/torch/sentence_transformers or SENTENCE_TRANSFORMERS_HOME.
     Subsequent calls use the cached weights without re-downloading.
 
@@ -37,10 +64,28 @@ def _get_model():
     """
     global _MODEL, _MODEL_NAME
     if _MODEL is None:
-        # Import here so the module can be imported without triggering model load.
-        from sentence_transformers import SentenceTransformer
-        _MODEL = SentenceTransformer(EMBEDDING_MODEL_NAME)
-        _MODEL_NAME = EMBEDDING_MODEL_NAME
+        with _MODEL_LOCK:
+            if _MODEL is None:
+                versions = get_embedding_package_versions()
+                logger.info(
+                    "Loading embedding model '%s' (packages: %s)",
+                    EMBEDDING_MODEL_NAME,
+                    versions,
+                )
+                try:
+                    # Import here so the module can be imported without triggering model load.
+                    from sentence_transformers import SentenceTransformer
+                    _MODEL = SentenceTransformer(EMBEDDING_MODEL_NAME)
+                    _MODEL_NAME = EMBEDDING_MODEL_NAME
+                    logger.info("Successfully loaded embedding model '%s'", EMBEDDING_MODEL_NAME)
+                except Exception as exc:
+                    logger.error(
+                        "Failed to load embedding model '%s'. Package versions: %s. Traceback:\n%s",
+                        EMBEDDING_MODEL_NAME,
+                        versions,
+                        traceback.format_exc(),
+                    )
+                    raise
     return _MODEL
 
 

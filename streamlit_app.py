@@ -18,11 +18,15 @@ Supports Streamlit Community Cloud deployment with:
 from __future__ import annotations
 
 import hmac
+import logging
 import os
 import threading
+import traceback
 from pathlib import Path
 from typing import Optional
 import streamlit as st
+
+logger = logging.getLogger("streamlit_app")
 
 
 # -----------------------------------------------------------------------------
@@ -120,6 +124,7 @@ def maybe_bootstrap_index(
             needs_bootstrap = True
     except Exception as exc:
         _bootstrap_error = f"Bootstrap pre-check error: {exc}"
+        logger.error("Bootstrap pre-check error: %s\n%s", exc, traceback.format_exc())
         return False, _bootstrap_error
 
     # If index already has chunks, do not bootstrap and NEVER replace it
@@ -144,6 +149,7 @@ def maybe_bootstrap_index(
         except Exception as exc:
             _bootstrap_attempted = True
             _bootstrap_error = f"Bootstrap locked-check error: {exc}"
+            logger.error("Bootstrap locked-check error: %s\n%s", exc, traceback.format_exc())
             return False, _bootstrap_error
 
         if not still_needs_bootstrap:
@@ -164,6 +170,14 @@ def maybe_bootstrap_index(
         except Exception as exc:
             _bootstrap_attempted = True
             _bootstrap_error = f"STREAMLIT_DEMO_BOOTSTRAP failed: {exc}"
+            from src.embeddings import get_embedding_package_versions
+            versions = get_embedding_package_versions()
+            logger.error(
+                "STREAMLIT_DEMO_BOOTSTRAP failed: %s (packages: %s)\nTraceback:\n%s",
+                exc,
+                versions,
+                traceback.format_exc(),
+            )
             return False, _bootstrap_error
 
 
