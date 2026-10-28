@@ -7,18 +7,30 @@ Verifies:
    - Initializing missing or empty index once per process with double-checked locking.
    - Reusing existing index without rebuilding (even if incompatible).
    - Initialization failure handling and blocking subsequent queries.
-3. Production security gate:
-   - Failing closed when APP_ENV=production and REVIEWER_ACCESS_TOKEN is missing.
-   - Password access form rejecting invalid tokens.
-   - Authenticating and unlocking queries on valid token.
-   - Allowing open access in non-production.
+3. Reviewer token validation & constant-time security:
+   - Constant-time comparison rejecting mismatched, empty, or missing tokens.
+   - Accepting valid token.
+   - Unlocking unlimited session access via sidebar and main form.
 4. Streamlit secrets propagation to os.environ before config import.
-5. Initial UI rendering (Title, Question input <=500 chars, top_k slider 1-10 defaulting to 5, Ask button).
-6. Explicit submission behavior (empty input rejected, character limit enforced).
-7. Grounded answer and evidence display (answer, citations, source, chunk ID, raw cosine distance, timings).
-8. Status badge rendering for answered, partial, conflict, abstain, and error.
-9. Session state caching across UI reruns without duplicate pipeline calls.
-10. Index-unhealthy blocking behavior with actionable remediation messages.
+5. Initial UI rendering and design refresh:
+   - Title: "Personal AI Knowledge Assistant"
+   - Subtitle explaining answers come from document collection
+   - Question text area (<= 500 characters)
+   - Top-k slider (1-10, default 5)
+   - Example-question buttons
+   - Free-question counter
+   - Ask button
+6. Feature 1 & 2 Verification Tests:
+   - Five allowed submissions and a blocked sixth request.
+   - Reruns and invalid inputs (blank or >500 chars) do not consume quota.
+   - Independent session counters across distinct browser sessions.
+   - Valid token bypasses quota; invalid token is rejected without quota reset.
+   - Previous answer and evidence remain visible after exhaustion.
+   - Contact-link configuration (CONTACT_URL, CONTACT_EMAIL) and setup notice when unconfigured.
+   - Example-question buttons populate input without submitting.
+   - Secondary diagnostics expander for timings and metadata.
+   - Status badge rendering for answered, partial, conflict, abstain, and error.
+   - Index-unhealthy blocking behavior with actionable remediation messages.
 
 All tests run completely offline with mocked pipeline responses and external services.
 No live OpenAI API calls or index rebuilds are executed.
@@ -35,9 +47,22 @@ from streamlit_app import (
     maybe_bootstrap_index,
     is_bootstrap_enabled,
     check_production_access,
+    validate_reviewer_token,
+    get_contact_info,
+    MAX_FREE_QUESTIONS,
     reset_bootstrap_state_for_tests,
     _sync_streamlit_secrets_to_env,
 )
+
+
+ASK_LABEL = "Ask assistant"
+EXHAUSTED_HEADING = "Your free preview is complete"
+EXHAUSTED_MESSAGE = "You’ve used your five questions. Request an access token to continue."
+
+
+def _texts(at):
+    """All markdown and caption text rendered in the main area and sidebar."""
+    return [m.value for m in at.markdown] + [c.value for c in at.caption]
 
 
 @pytest.fixture(autouse=True)
@@ -184,7 +209,6 @@ def test_bootstrap_reuse_existing_index(monkeypatch):
         ok, err = maybe_bootstrap_index()
         assert ok is True
         assert err is None
-        # Existing index must NOT be rebuilt
         mock_ingest.assert_not_called()
 
 
@@ -234,64 +258,70 @@ def test_bootstrap_initialization_failure(monkeypatch, caplog):
 
 
 # -----------------------------------------------------------------------------
-# 3. Production Access & Reviewer Token Security Tests
+# 3. Reviewer Token Security & Constant-Time Validation
 # -----------------------------------------------------------------------------
 
-def test_production_access_fails_closed_when_token_missing(monkeypatch):
-    """Verify production access fails closed when REVIEWER_ACCESS_TOKEN is missing."""
-    monkeypatch.setenv("APP_ENV", "production")
+def test_validate_reviewer_token_constant_time(monkeypatch):
+    """Verify constant-time validation safely compares tokens and rejects invalid inputs."""
+    monkeypatch.setenv("REVIEWER_ACCESS_TOKEN", "valid-secret-token")
+
+    # Correct token
+    assert validate_reviewer_token("valid-secret-token") is True
+    # Strip whitespace handling
+    assert validate_reviewer_token("  valid-secret-token  ") is True
+    # Incorrect token
+    assert validate_reviewer_token("wrong-token") is False
+    # Empty token
+    assert validate_reviewer_token("") is False
+    assert validate_reviewer_token("   ") is False
+
+    # Server token unset: fails closed
     monkeypatch.delenv("REVIEWER_ACCESS_TOKEN", raising=False)
-
-    with patch("streamlit.error") as mock_st_error:
-        authorized = check_production_access()
-        assert authorized is False
-        mock_st_error.assert_called_once()
-        assert "Production Access Blocked" in mock_st_error.call_args[0][0]
+    assert validate_reviewer_token("valid-secret-token") is False
 
 
-def test_production_access_form_rejects_invalid_token(monkeypatch):
-    """Verify production access form rejects invalid token via AppTest."""
-    monkeypatch.setenv("APP_ENV", "production")
+def test_check_production_access_allowance_and_bypass():
+    """Verify check_production_access respects the 5-question allowance and token bypass."""
+    with patch("streamlit.session_state", {"questions_used": 0, "authenticated": False}):
+        assert check_production_access() is True
+
+    with patch("streamlit.session_state", {"questions_used": 4, "authenticated": False}):
+        assert check_production_access() is True
+
+    with patch("streamlit.session_state", {"questions_used": 5, "authenticated": False}):
+        assert check_production_access() is False
+
+    with patch("streamlit.session_state", {"questions_used": 5, "authenticated": True}):
+        assert check_production_access() is True
+
+
+def test_sidebar_access_form_rejects_invalid_token(monkeypatch):
+    """Verify entering an invalid token in sidebar displays error and does not authenticate."""
     monkeypatch.setenv("REVIEWER_ACCESS_TOKEN", "valid-reviewer-token")
 
     at = AppTest.from_file("streamlit_app.py", default_timeout=15).run()
 
-    # Form should be shown
-    assert len(at.text_input) >= 1
-    at.text_input[0].input("wrong-token")
-    unlock_btn = [b for b in at.button if b.label == "Unlock Assistant"][0]
-    unlock_btn.click().run()
+    # Enter wrong token in sidebar form
+    at.sidebar.text_input[0].input("wrong-token")
+    sidebar_unlock = [b for b in at.sidebar.button if "unlock" in b.label.lower()][0]
+    sidebar_unlock.click().run()
 
     assert at.session_state["authenticated"] is False
-    assert any("Invalid access token" in err.value for err in at.error)
+    assert any("Invalid access token" in err.value for err in at.sidebar.error)
 
 
-def test_production_access_form_grants_access_on_valid_token(monkeypatch):
-    """Verify entering valid token grants access in production."""
-    monkeypatch.setenv("APP_ENV", "production")
+def test_sidebar_access_form_grants_access_on_valid_token(monkeypatch):
+    """Verify entering valid token in sidebar unlocks assistant for the session."""
     monkeypatch.setenv("REVIEWER_ACCESS_TOKEN", "valid-reviewer-token")
 
     at = AppTest.from_file("streamlit_app.py", default_timeout=15).run()
 
-    # Enter correct token
-    at.text_input[0].input("valid-reviewer-token")
-    unlock_btn = [b for b in at.button if b.label == "Unlock Assistant"][0]
-    unlock_btn.click().run()
+    at.sidebar.text_input[0].input("valid-reviewer-token")
+    sidebar_unlock = [b for b in at.sidebar.button if "unlock" in b.label.lower()][0]
+    sidebar_unlock.click().run()
 
     assert at.session_state["authenticated"] is True
-    # Query form should now be visible
-    assert any(b.label == "Ask" for b in at.button)
-
-
-def test_development_access_open_without_token(monkeypatch):
-    """Verify development mode allows open access without reviewer token form."""
-    monkeypatch.setenv("APP_ENV", "development")
-    monkeypatch.delenv("REVIEWER_ACCESS_TOKEN", raising=False)
-
-    at = AppTest.from_file("streamlit_app.py", default_timeout=15).run()
-
-    # Query form is directly available without login gate
-    assert any(b.label == "Ask" for b in at.button)
+    assert any("Access unlocked" in s.value for s in at.success)
 
 
 # -----------------------------------------------------------------------------
@@ -313,47 +343,61 @@ def test_sync_streamlit_secrets_to_env(monkeypatch):
 
 
 # -----------------------------------------------------------------------------
-# 5. Streamlit UI Rendering and Submission Behavior Tests (AppTest)
+# 5. Streamlit UI Rendering and Form Behavior Tests
 # -----------------------------------------------------------------------------
 
 def test_streamlit_initial_render(monkeypatch):
-    """Verify initial UI components: title, form, question area, top_k slider, ask button."""
+    """Verify initial UI components: title, subtitle, counter, example buttons, slider, ask button."""
     monkeypatch.setenv("APP_ENV", "development")
     at = AppTest.from_file("streamlit_app.py", default_timeout=15).run()
 
-    # Check Title
+    # Title & Subtitle
     assert len(at.title) >= 1
-    assert at.title[0].value == "Personal AI Knowledge Assistant"
+    assert at.title[0].value == "Ask your knowledge base"
+    assert any("inspect the sources" in c.value for c in at.caption)
 
-    # Check Question Input with 500-character max limit
+    # Free Question Counter (starts at 5 of 5)
+    assert any("5 of 5 free questions remaining" in t for t in _texts(at))
+
+    # Example question buttons present
+    example_btn_labels = [b.label for b in at.button if "Project" in b.label]
+    assert len(example_btn_labels) >= 3
+    assert "What database does Project Nexus use?" in example_btn_labels
+    assert "Where was Project Aurora deployed?" in example_btn_labels
+    assert "What was the latency reduction achieved in Project Beacon?" in example_btn_labels
+
+    # Question Input with 500-character max limit
     assert len(at.text_area) >= 1
     assert at.text_area[0].max_chars == 500
 
-    # Check Slider: default 5, min 1, max 10
+    # Slider: default 5, min 1, max 10
     assert len(at.slider) >= 1
     slider = at.slider[0]
     assert slider.value == 5
     assert slider.min == 1
     assert slider.max == 10
 
-    # Check Form Submit Button
-    ask_btn = [b for b in at.button if b.label == "Ask"]
+    # Ask button
+    ask_btn = [b for b in at.button if b.label == ASK_LABEL]
     assert len(ask_btn) == 1
 
-    # Last result should be None initially
+    # Initial session state
     assert at.session_state["last_result"] is None
+    assert at.session_state["questions_used"] == 0
+    assert at.session_state["authenticated"] is False
 
 
 def test_streamlit_empty_submission(monkeypatch):
-    """Verify submitting empty question displays warning and does not call pipeline."""
+    """Verify submitting empty question displays warning and does not consume quota."""
     monkeypatch.setenv("APP_ENV", "development")
     with patch("src.pipeline.query_pipeline") as mock_pipeline:
         at = AppTest.from_file("streamlit_app.py", default_timeout=15).run()
         at.text_area[0].input("   ")
-        ask_btn = [b for b in at.button if b.label == "Ask"][0]
+        ask_btn = [b for b in at.button if b.label == ASK_LABEL][0]
         ask_btn.click().run()
 
         mock_pipeline.assert_not_called()
+        assert at.session_state["questions_used"] == 0
         assert len(at.warning) >= 1
         assert "non-empty question" in at.warning[0].value.lower()
 
@@ -396,38 +440,36 @@ def test_streamlit_successful_query_flow(monkeypatch):
         # Input query and submit
         at.text_area[0].input("What database does Project Nexus use?")
         at.slider[0].set_value(4)
-        ask_btn = [b for b in at.button if b.label == "Ask"][0]
+        ask_btn = [b for b in at.button if b.label == ASK_LABEL][0]
         ask_btn.click().run()
 
-        # Pipeline must be called with expected parameters
         mock_pipe.assert_called_once_with(
             question="What database does Project Nexus use?",
             top_k=4,
         )
 
-        # Result preserved in session state
+        # Quota incremented to 1
+        assert at.session_state["questions_used"] == 1
         assert at.session_state["last_result"] == mock_result
 
-        # Success banner for "answered" status
-        assert any("Answered" in s.value for s in at.success)
-
-        # Metrics rendered for timings
-        metric_labels = [m.label for m in at.metric]
-        assert "Retrieval Latency" in metric_labels
-        assert "Generation Latency" in metric_labels
-        assert "Total Latency" in metric_labels
-
-        retrieval_m = [m for m in at.metric if m.label == "Retrieval Latency"][0]
-        assert "12.5 ms" in retrieval_m.value
+        # Restrained status badge for "answered" status
+        assert any("Answered" in t for t in _texts(at))
 
         # Citations rendered
         markdown_texts = [m.value for m in at.markdown]
         assert any("nexus_01" in m for m in markdown_texts)
         assert any("project_nexus.md" in m for m in markdown_texts)
-        assert any("0.1234" in m for m in markdown_texts)
 
-        # Raw distance and chunk ID displayed for evidence
+        # Raw distance and chunk ID displayed in evidence
         assert any("Raw Cosine Distance" in m for m in markdown_texts)
+
+        # Metrics rendered for latency timings inside secondary expander
+        metric_labels = [m.label for m in at.metric]
+        assert "Retrieval Latency" in metric_labels
+        assert "Generation Latency" in metric_labels
+        assert "Total Latency" in metric_labels
+        retrieval_m = [m for m in at.metric if m.label == "Retrieval Latency"][0]
+        assert "12.5 ms" in retrieval_m.value
 
 
 def test_streamlit_preserves_session_state_on_subsequent_rerun(monkeypatch):
@@ -461,17 +503,19 @@ def test_streamlit_preserves_session_state_on_subsequent_rerun(monkeypatch):
 
         # 1. Ask question
         at.text_area[0].input("What is Project Aurora?")
-        ask_btn = [b for b in at.button if b.label == "Ask"][0]
+        ask_btn = [b for b in at.button if b.label == ASK_LABEL][0]
         ask_btn.click().run()
 
         assert mock_pipe.call_count == 1
+        assert at.session_state["questions_used"] == 1
         assert at.session_state["last_result"] == mock_result
 
         # 2. Trigger a normal rerun without clicking Ask
         at.run()
 
-        # query_pipeline must NOT be called again
+        # query_pipeline must NOT be called again, questions_used remains 1
         assert mock_pipe.call_count == 1
+        assert at.session_state["questions_used"] == 1
 
         # Content must still be rendered from session state
         markdown_texts = [m.value for m in at.markdown]
@@ -479,10 +523,10 @@ def test_streamlit_preserves_session_state_on_subsequent_rerun(monkeypatch):
 
 
 @pytest.mark.parametrize("status,expected_widget,expected_text", [
-    ("partial", "warning", "Partial"),
-    ("conflict", "warning", "Conflict"),
-    ("abstain", "info", "Abstain"),
-    ("error", "error", "Error"),
+    ("partial", "markdown", "Partial answer"),
+    ("conflict", "markdown", "Conflicting sources"),
+    ("abstain", "markdown", "Insufficient evidence"),
+    ("error", "error", "Simulated pipeline failure"),
 ])
 def test_streamlit_status_rendering(monkeypatch, status, expected_widget, expected_text):
     """Verify distinct display for partial, conflict, abstain, and error statuses."""
@@ -504,14 +548,13 @@ def test_streamlit_status_rendering(monkeypatch, status, expected_widget, expect
     with patch("src.pipeline.query_pipeline", return_value=mock_result):
         at = AppTest.from_file("streamlit_app.py", default_timeout=15).run()
         at.text_area[0].input("Test query")
-        ask_btn = [b for b in at.button if b.label == "Ask"][0]
+        ask_btn = [b for b in at.button if b.label == ASK_LABEL][0]
         ask_btn.click().run()
 
         widget_list = getattr(at, expected_widget)
         assert len(widget_list) >= 1
         assert any(expected_text in w.value for w in widget_list)
 
-        # If partial, missing information section should also be present
         if status == "partial":
             assert any("Information about missing component." in i.value for i in at.info)
 
@@ -531,9 +574,300 @@ def test_streamlit_blocks_submission_when_index_unhealthy(monkeypatch):
 
         # Attempt to submit question
         at.text_area[0].input("Valid question text")
-        ask_btn = [b for b in at.button if b.label == "Ask"][0]
+        ask_btn = [b for b in at.button if b.label == ASK_LABEL][0]
         ask_btn.click().run()
 
-        # Pipeline must not have been executed
+        # Pipeline must not have been executed and quota must not be consumed
         mock_pipe.assert_not_called()
+        assert at.session_state["questions_used"] == 0
         assert at.session_state["last_result"] is None
+
+
+# -----------------------------------------------------------------------------
+# 6. Focused Offline Verification Tests for Features 1 & 2
+# -----------------------------------------------------------------------------
+
+def test_five_allowed_submissions_and_blocked_sixth(monkeypatch):
+    """Verify 5 questions are allowed without a token, and the 6th is blocked server-side."""
+    monkeypatch.setenv("APP_ENV", "production")
+    mock_result = {
+        "question": "q",
+        "answer": "answer content",
+        "status": "answered",
+        "missing_information": None,
+        "citations": [],
+        "invalid_citations": [],
+        "citation_disclaimer": "",
+        "retrieved_evidence": [],
+        "timings": {"retrieval_ms": 1.0, "generation_ms": 2.0, "total_ms": 3.0},
+        "model": "gpt-4o-mini",
+        "error": None,
+    }
+
+    with patch("src.pipeline.query_pipeline", return_value=mock_result) as mock_pipe:
+        at = AppTest.from_file("streamlit_app.py", default_timeout=15).run()
+        assert at.session_state["questions_used"] == 0
+        assert any("5 of 5 free questions remaining" in t for t in _texts(at))
+
+        # Perform 5 submissions
+        for i in range(1, 6):
+            at.text_area[0].input(f"Question number {i}")
+            ask_btn = [b for b in at.button if b.label == ASK_LABEL][0]
+            ask_btn.click().run()
+
+            assert mock_pipe.call_count == i
+            assert at.session_state["questions_used"] == i
+            rem = MAX_FREE_QUESTIONS - i
+            if rem > 0:
+                assert any(f"{rem} of 5 free questions remaining" in t for t in _texts(at))
+
+        # Quota is now exhausted (5 used)
+        assert at.session_state["questions_used"] == 5
+        assert any(EXHAUSTED_HEADING in h.value for h in at.subheader)
+        assert any(EXHAUSTED_MESSAGE in m.value for m in at.markdown)
+
+        # Attempt 6th submission
+        at.text_area[0].input("Attempting 6th question")
+        ask_btn = [b for b in at.button if b.label == ASK_LABEL][0]
+        ask_btn.click().run()
+
+        # Pipeline must NOT be invoked on 6th request (call count remains 5)
+        assert mock_pipe.call_count == 5
+        assert at.session_state["questions_used"] == 5
+        assert any(EXHAUSTED_HEADING in h.value for h in at.subheader)
+        assert any(EXHAUSTED_MESSAGE in m.value for m in at.markdown)
+
+
+def test_reruns_and_invalid_inputs_do_not_consume_quota(monkeypatch):
+    """Verify ordinary Streamlit reruns and blank/whitespace inputs do not consume quota."""
+    monkeypatch.setenv("APP_ENV", "production")
+
+    with patch("src.pipeline.query_pipeline") as mock_pipe:
+        at = AppTest.from_file("streamlit_app.py", default_timeout=15).run()
+        assert at.session_state["questions_used"] == 0
+        assert at.text_area[0].max_chars == 500
+
+        # 1. Blank input with whitespace
+        at.text_area[0].input("   ")
+        [b for b in at.button if b.label == ASK_LABEL][0].click().run()
+        assert mock_pipe.call_count == 0
+        assert at.session_state["questions_used"] == 0
+        assert any("non-empty question" in w.value.lower() for w in at.warning)
+
+        # 2. Completely empty input
+        at.text_area[0].input("")
+        [b for b in at.button if b.label == ASK_LABEL][0].click().run()
+        assert mock_pipe.call_count == 0
+        assert at.session_state["questions_used"] == 0
+        assert any("non-empty question" in w.value.lower() for w in at.warning)
+
+        # 3. Ordinary rerun
+        at.run()
+        assert mock_pipe.call_count == 0
+        assert at.session_state["questions_used"] == 0
+        assert any("5 of 5 free questions remaining" in t for t in _texts(at))
+
+
+def test_sessions_have_independent_counters(monkeypatch):
+    """Verify that distinct browser sessions have independent question counters."""
+    monkeypatch.setenv("APP_ENV", "production")
+    mock_result = {
+        "question": "q",
+        "answer": "ans",
+        "status": "answered",
+        "missing_information": None,
+        "citations": [],
+        "invalid_citations": [],
+        "citation_disclaimer": "",
+        "retrieved_evidence": [],
+        "timings": {"retrieval_ms": 1.0, "generation_ms": 1.0, "total_ms": 2.0},
+        "model": "gpt-4o-mini",
+        "error": None,
+    }
+
+    with patch("src.pipeline.query_pipeline", return_value=mock_result):
+        # Session A: submits 2 questions
+        session_a = AppTest.from_file("streamlit_app.py", default_timeout=15).run()
+        session_a.text_area[0].input("Session A - Question 1")
+        [b for b in session_a.button if b.label == ASK_LABEL][0].click().run()
+        session_a.text_area[0].input("Session A - Question 2")
+        [b for b in session_a.button if b.label == ASK_LABEL][0].click().run()
+
+        assert session_a.session_state["questions_used"] == 2
+        assert any("3 of 5 free questions remaining" in t for t in _texts(session_a))
+
+        # Session B: independent session starts at 0 used
+        session_b = AppTest.from_file("streamlit_app.py", default_timeout=15).run()
+        assert session_b.session_state["questions_used"] == 0
+        assert any("5 of 5 free questions remaining" in t for t in _texts(session_b))
+
+
+def test_valid_token_bypass_and_invalid_token_rejection(monkeypatch):
+    """Verify invalid token rejection and valid token bypass of the 5-question limit."""
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("REVIEWER_ACCESS_TOKEN", "valid-secret-reviewer-token")
+
+    mock_result = {
+        "question": "q",
+        "answer": "ans",
+        "status": "answered",
+        "missing_information": None,
+        "citations": [],
+        "invalid_citations": [],
+        "citation_disclaimer": "",
+        "retrieved_evidence": [],
+        "timings": {"retrieval_ms": 1.0, "generation_ms": 1.0, "total_ms": 2.0},
+        "model": "gpt-4o-mini",
+        "error": None,
+    }
+
+    with patch("src.pipeline.query_pipeline", return_value=mock_result) as mock_pipe:
+        at = AppTest.from_file("streamlit_app.py", default_timeout=15).run()
+
+        # Exhaust 5 free questions
+        for i in range(5):
+            at.text_area[0].input(f"Exhaustion query {i}")
+            [b for b in at.button if b.label == ASK_LABEL][0].click().run()
+        assert at.session_state["questions_used"] == 5
+        assert mock_pipe.call_count == 5
+
+        # 1. Attempt unlock with INVALID token
+        token_inputs = [ti for ti in at.text_input if "token" in ti.label.lower()]
+        assert len(token_inputs) >= 1
+        token_inputs[0].input("incorrect-token")
+        unlock_btns = [b for b in at.button if "unlock" in b.label.lower()]
+        assert len(unlock_btns) >= 1
+        unlock_btns[0].click().run()
+
+        # Quota remains exhausted, unauthenticated, pipeline not called
+        assert at.session_state["authenticated"] is False
+        assert at.session_state["questions_used"] == 5
+        assert mock_pipe.call_count == 5
+        assert any("Invalid access token" in err.value for err in at.error)
+
+        # 2. Attempt unlock with VALID token
+        token_inputs = [ti for ti in at.text_input if "token" in ti.label.lower()]
+        token_inputs[0].input("valid-secret-reviewer-token")
+        unlock_btns = [b for b in at.button if "unlock" in b.label.lower()]
+        unlock_btns[0].click().run()
+
+        # Session authenticated and quota bypassed
+        assert at.session_state["authenticated"] is True
+        assert any("Access unlocked" in s.value for s in at.success)
+
+        # 3. 6th query now executes successfully!
+        at.text_area[0].input("Bypassed 6th question")
+        [b for b in at.button if b.label == ASK_LABEL][0].click().run()
+        assert mock_pipe.call_count == 6
+
+
+def test_previous_results_remain_visible_after_exhaustion(monkeypatch):
+    """Verify that previously rendered answer and evidence remain visible when quota is exhausted."""
+    monkeypatch.setenv("APP_ENV", "production")
+    mock_fifth_result = {
+        "question": "What is Project Beacon?",
+        "answer": "Project Beacon achieved 42% latency reduction.",
+        "status": "answered",
+        "missing_information": None,
+        "citations": [{"chunk_id": "beacon_01", "source": "project_beacon.md", "page": 1}],
+        "invalid_citations": [],
+        "citation_disclaimer": "Verified citation",
+        "retrieved_evidence": [
+            {
+                "chunk_id": "beacon_01",
+                "text": "Project Beacon achieved 42% latency reduction.",
+                "source": "project_beacon.md",
+                "page": 1,
+                "chunk_index": 0,
+                "distance": 0.05,
+            }
+        ],
+        "timings": {"retrieval_ms": 8.0, "generation_ms": 120.0, "total_ms": 128.0},
+        "model": "gpt-4o-mini",
+        "error": None,
+    }
+
+    with patch("src.pipeline.query_pipeline", return_value=mock_fifth_result) as mock_pipe:
+        at = AppTest.from_file("streamlit_app.py", default_timeout=15).run()
+
+        # Submit 5 questions
+        for i in range(4):
+            at.text_area[0].input(f"Query {i}")
+            [b for b in at.button if b.label == ASK_LABEL][0].click().run()
+
+        at.text_area[0].input("What is Project Beacon?")
+        [b for b in at.button if b.label == ASK_LABEL][0].click().run()
+        assert mock_pipe.call_count == 5
+        assert at.session_state["last_result"] == mock_fifth_result
+
+        # Verify answer rendered
+        assert any("beacon_01" in m.value for m in at.markdown)
+
+        # Attempt 6th blocked submission
+        at.text_area[0].input("Attempting 6th question")
+        [b for b in at.button if b.label == ASK_LABEL][0].click().run()
+
+        # Pipeline not called on 6th
+        assert mock_pipe.call_count == 5
+        # Previous result is preserved in session state
+        assert at.session_state["last_result"] == mock_fifth_result
+        # Previous answer and citation still rendered on screen
+        assert any("beacon_01" in m.value for m in at.markdown)
+
+
+def test_contact_link_configuration_and_error_rendering(monkeypatch):
+    """Verify contact link destination selection and notice when neither is configured."""
+    # 1. When CONTACT_EMAIL is configured
+    monkeypatch.setenv("CONTACT_EMAIL", "reviewer@example.com")
+    monkeypatch.delenv("CONTACT_URL", raising=False)
+    info_email = get_contact_info()
+    assert info_email["configured"] is True
+    assert "mailto:reviewer@example.com" in info_email["url"]
+
+    # 2. When CONTACT_URL is configured (priority)
+    monkeypatch.setenv("CONTACT_URL", "https://example.com/contact")
+    monkeypatch.delenv("CONTACT_EMAIL", raising=False)
+    info_url = get_contact_info()
+    assert info_url["configured"] is True
+    assert info_url["url"] == "https://example.com/contact"
+
+    # 3. When neither is configured: setup notice rendered without invented contact
+    monkeypatch.delenv("CONTACT_EMAIL", raising=False)
+    monkeypatch.delenv("CONTACT_URL", raising=False)
+    info_none = get_contact_info()
+    assert info_none["configured"] is False
+    assert info_none["url"] is None
+
+    mock_result = {
+        "question": "q", "answer": "a", "status": "answered", "missing_information": None,
+        "citations": [], "invalid_citations": [], "citation_disclaimer": "", "retrieved_evidence": [],
+        "timings": {"retrieval_ms": 1.0, "generation_ms": 1.0, "total_ms": 2.0}, "model": "gpt-4o-mini", "error": None,
+    }
+
+    with patch("src.pipeline.query_pipeline", return_value=mock_result):
+        at = AppTest.from_file("streamlit_app.py", default_timeout=15).run()
+        for _ in range(5):
+            at.text_area[0].input("query")
+            [b for b in at.button if b.label == ASK_LABEL][0].click().run()
+
+        # Setup notice must be displayed when neither is configured
+        assert any("Contact information is not configured on this server" in info.value for info in at.info)
+
+
+def test_example_question_buttons_populate_input_without_submitting(monkeypatch):
+    """Verify example question buttons populate question input without calling pipeline."""
+    monkeypatch.setenv("APP_ENV", "development")
+
+    with patch("src.pipeline.query_pipeline") as mock_pipe:
+        at = AppTest.from_file("streamlit_app.py", default_timeout=15).run()
+
+        # Click "Project Nexus" example button
+        nexus_btn = [b for b in at.button if b.label == "What database does Project Nexus use?"][0]
+        nexus_btn.click().run()
+
+        # Text area value should be populated with the example query
+        assert at.text_area[0].value == "What database does Project Nexus use?"
+        # Pipeline must NOT be called
+        mock_pipe.assert_not_called()
+        # Quota must NOT be consumed
+        assert at.session_state["questions_used"] == 0

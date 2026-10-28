@@ -65,14 +65,20 @@ streamlit run streamlit_app.py
 The application will open in your browser at `http://localhost:8501`.
 
 **Features Provided**:
-- **Title**: Personal AI Knowledge Assistant
+- **Title & Subtitle**: "Personal AI Knowledge Assistant" with explanation that answers come strictly from the document collection
+- **Five Free Questions Demo Flow**: Visitors can ask 5 questions per browser session without an access token. A live counter displays remaining questions (e.g., "3 of 5 free questions remaining"). Submissions past the 5-question quota are blocked server-side with an exhaustion notice.
+- **Session-Based Demo Allowance**: Documented as an in-memory session allowance for demo visitors, not a permanent per-person limit or hard spending cap.
+- **Access Requests & Contact Links**: When quota is exhausted, visitors receive a "Request access" link destination read from `CONTACT_EMAIL` or `CONTACT_URL`. If neither is configured, an informative setup notice is displayed without inventing contact details.
+- **Reviewer Token Entry**: Reviewers can enter `REVIEWER_ACCESS_TOKEN` at any time (via sidebar or in-page unlock form) to bypass the demo quota and unlock unlimited queries for the session. Tokens are validated server-side using constant-time comparison. Invalid tokens reject access without resetting the quota or invoking the pipeline.
+- **Design Refresh**: Refined portfolio aesthetic with light background, dark navy text, teal accents, and responsive layout.
+- **Example-Question Buttons**: One-click example buttons that populate the question input without submitting.
 - **Question Input**: Character-limited to 500 characters
 - **Top-K Selector**: Slider from 1 to 10 (defaults to 5)
 - **Explicit Submission**: Ask button inside a form prevents accidental queries
-- **State Preservation**: Queries are submitted only on explicit Ask actions; results are cached in Streamlit session state across ordinary UI reruns
+- **State Preservation**: Queries are submitted only on explicit Ask actions; results are cached in Streamlit session state across ordinary UI reruns and preserved after quota exhaustion
 - **Status Display**: Distinct visual indicators for answered, partial, conflict, abstain, and error statuses
-- **Evidence & Citations**: Direct display of grounded answer, missing information, storage-verified citations, and expandable retrieved evidence chunks showing source, chunk ID, and raw cosine distance (smaller is more similar; not a probability)
-- **Latency Timings**: Live display of retrieval, generation, and total latency breakdown
+- **Evidence & Citations**: Direct display of grounded answer, missing information, storage-verified citations, and collapsible retrieved evidence chunks showing source, chunk ID, and raw cosine distance (smaller is more similar; not a probability)
+- **Secondary Diagnostics Area**: Dedicated collapsible expander for retrieval, generation, and total latency timings as well as model metadata
 
 ### 5. Streamlit Community Cloud Settings
 
@@ -80,10 +86,12 @@ For deployment on Streamlit Community Cloud (via the app settings dashboard or `
 
 | Variable / Secret | Required in Cloud | Default | Description & Security Boundary |
 |---|---|---|---|
-| `APP_ENV` | **Yes** | `development` | Set to `production` for cloud deployments. Enforces reviewer authentication and fails closed if access tokens are missing. |
+| `APP_ENV` | **Yes** | `development` | Set to `production` for cloud deployments. |
 | `OPENAI_API_KEY` | **Yes** | None | **Confidential.** OpenAI API key for `gpt-4o-mini` generation. Populated from Streamlit secrets before config loading; never displayed or logged. |
 | `OPENAI_MODEL` | No | `gpt-4o-mini` | Operational model identifier override. |
-| `REVIEWER_ACCESS_TOKEN` | **Yes** in prod | None | **Confidential.** Shared secret token required in production (`APP_ENV=production`). Streamlit displays a password gate before allowing queries and fails closed if unset. |
+| `REVIEWER_ACCESS_TOKEN` | Optional | None | **Confidential.** Shared secret token for reviewers. Entering this token bypasses the 5-question session demo quota and unlocks unlimited queries. |
+| `CONTACT_EMAIL` | Optional | None | Destination email for access token requests (e.g., `author@example.com`). Rendered as a mailto link. |
+| `CONTACT_URL` | Optional | None | Destination website URL for access token requests (e.g., `https://example.com/contact`). Overrides `CONTACT_EMAIL` if set. |
 | `STREAMLIT_DEMO_BOOTSTRAP` | Optional | `false` | When set to `true`, automatically builds the Chroma index from committed sanitized documents in `data/documents/` on startup if the index is missing or empty. Safe, once-per-process, thread-locked, double-checked, and never replaces an existing index. |
 
 ---

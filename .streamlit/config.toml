@@ -1,0 +1,28 @@
+# Streamlit theme for the Knowledge Assistant interface.
+# Appearance only: no secrets belong in this file (use secrets.toml, which is git-ignored).
+
+[theme]
+base = "light"
+primaryColor = "#2563EB"
+backgroundColor = "#F4F6FA"
+secondaryBackgroundColor = "#F8FAFC"
+textColor = "#172033"
+linkColor = "#2563EB"
+borderColor = "#E2E8F0"
+showWidgetBorder = true
+showSidebarBorder = true
+baseRadius = "0.5rem"
+buttonRadius = "0.5rem"
+baseFontSize = 16
+font = "sans-serif"
+# h1 .. h6: keep headings modest so content, not titles, carries the page.
+headingFontSizes = ["1.75rem", "1.375rem", "1.125rem", "1rem", "0.9375rem", "0.875rem"]
+headingFontWeights = [650, 600, 600, 600, 600, 600]
+codeBackgroundColor = "#F1F5F9"
+codeTextColor = "#172033"
+grayTextColor = "#64748B"
+
+[theme.sidebar]
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F8FAFC"
+
